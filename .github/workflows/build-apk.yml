@@ -1,0 +1,122 @@
+name: Build Spoken English Mastery APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Extract Flutter project
+        run: |
+          unzip -q spoken_english_mastery.zip -d source
+          test -f source/spoken_english/pubspec.yaml
+          mkdir -p source/spoken_english/assets/icon
+          cp branding/spoken-english-icon.svg source/spoken_english/assets/icon/icon.svg
+          cp branding/spoken-english-icon-foreground.svg source/spoken_english/assets/icon/icon_fg.svg
+
+      - name: Render custom app icon
+        run: |
+          python3 -m pip install --disable-pip-version-check cairosvg
+          python3 - <<'PY'
+          from pathlib import Path
+          import cairosvg
+
+          icon = Path("source/spoken_english/assets/icon")
+          cairosvg.svg2png(url=str(icon / "icon.svg"), write_to=str(icon / "icon.png"), output_width=1024, output_height=1024)
+          cairosvg.svg2png(url=str(icon / "icon_fg.svg"), write_to=str(icon / "icon_fg.png"), output_width=1024, output_height=1024)
+          PY
+
+      - name: Generate Android project
+        working-directory: source/spoken_english
+        run: flutter create --platforms=android --org com.torikul --project-name spoken_english_mastery .
+
+      - name: Configure app label and speech permissions
+        working-directory: source/spoken_english
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          manifest = Path("android/app/src/main/AndroidManifest.xml")
+          ET.register_namespace("android", "http://schemas.android.com/apk/res/android")
+          android = "{http://schemas.android.com/apk/res/android}"
+          tree = ET.parse(manifest)
+          root = tree.getroot()
+          app = root.find("application")
+          if app is None:
+              raise SystemExit("Android manifest has no application element")
+
+          app.set(android + "label", "Spoken English Mastery")
+          app.set(android + "icon", "@mipmap/ic_launcher")
+          app.set(android + "roundIcon", "@mipmap/ic_launcher")
+
+          for permission in ("android.permission.INTERNET", "android.permission.RECORD_AUDIO"):
+              if not any(node.get(android + "name") == permission for node in root.findall("uses-permission")):
+                  root.insert(list(root).index(app), ET.Element("uses-permission", {android + "name": permission}))
+
+          queries = root.find("queries")
+          if queries is None:
+              queries = ET.Element("queries")
+              root.append(queries)
+          for action_name in ("android.speech.RecognitionService", "android.intent.action.TTS_SERVICE"):
+              found = any(
+                  action.get(android + "name") == action_name
+                  for intent in queries.findall("intent")
+                  for action in intent.findall("action")
+              )
+              if not found:
+                  intent = ET.SubElement(queries, "intent")
+                  ET.SubElement(intent, "action", {android + "name": action_name})
+
+          tree.write(manifest, encoding="utf-8", xml_declaration=True)
+          PY
+
+      - name: Resolve Flutter dependencies
+        working-directory: source/spoken_english
+        run: flutter pub get
+
+      - name: Generate launcher icons
+        working-directory: source/spoken_english
+        run: dart run flutter_launcher_icons
+
+      - name: Build release APK
+        working-directory: source/spoken_english
+        run: flutter build apk --release
+
+      - name: Upload installable APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: spoken-english-mastery-apk
+          path: source/spoken_english/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload app icon
+        uses: actions/upload-artifact@v4
+        with:
+          name: spoken-english-mastery-app-icon
+          path: source/spoken_english/assets/icon/icon.png
+          if-no-files-found: error
+          retention-days: 30
